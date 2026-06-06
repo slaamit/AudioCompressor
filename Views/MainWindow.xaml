@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:oxy="http://oxyplot.org/wpf"
         xmlns:vm="clr-namespace:AudioCompressor.ViewModels"
-        Title="Audio Compressor" Height="700" Width="950"
+        Title="Audio Compressor" Height="860" Width="950"
         AllowDrop="True" Drop="Window_Drop">
     <Window.DataContext>
         <vm:MainViewModel/>

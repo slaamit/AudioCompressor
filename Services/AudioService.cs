@@ -1,4 +1,4 @@
-﻿using NAudio.Wave;
+using NAudio.Wave;
 using System;
 using System.IO;
 
@@ -6,24 +6,37 @@ namespace AudioCompressor.Services
 {
     public class AudioService
     {
-        private WaveOutEvent? _waveOut;
+        private WaveOutEvent?    _waveOut;
         private AudioFileReader? _audioReader;
 
-        public (WaveFormat format, float[] samples) LoadAudio(string filePath)
+        // ── Load ──────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Loads an audio file and returns its WaveFormat and normalized float samples.
+        /// Also returns the actual file size on disk in bytes (used for compression
+        /// ratio calculation — NOT samples.Length * 4 which is the float array size).
+        /// </summary>
+        public (WaveFormat format, float[] samples, long fileSizeBytes) LoadAudio(string filePath)
         {
-            using var reader = new AudioFileReader(filePath);
-            var format = reader.WaveFormat;
-            int sampleCount = (int)(reader.Length / 4);
+            long fileSizeBytes = new FileInfo(filePath).Length;
+
+            using var reader     = new AudioFileReader(filePath);
+            var       format     = reader.WaveFormat;
+            var sampleProvider = reader.ToSampleProvider();
+            int sampleCount = (int)(reader.Length / sizeof(float));
             float[] samples = new float[sampleCount];
             reader.Read(samples, 0, sampleCount);
-            return (format, samples);
+
+            return (format, samples, fileSizeBytes);
         }
+
+        // ── Playback ──────────────────────────────────────────────────────────
 
         public void Play(string filePath)
         {
             Stop();
             _audioReader = new AudioFileReader(filePath);
-            _waveOut = new WaveOutEvent();
+            _waveOut     = new WaveOutEvent();
             _waveOut.Init(_audioReader);
             _waveOut.Play();
         }
@@ -33,35 +46,47 @@ namespace AudioCompressor.Services
             _waveOut?.Stop();
             _waveOut?.Dispose();
             _audioReader?.Dispose();
-            _waveOut = null;
+            _waveOut     = null;
             _audioReader = null;
         }
 
-        public (TimeSpan duration, int sampleRate, int channels, int bitRate, string codec) GetProperties(string filePath)
-        {
-            using var reader = new AudioFileReader(filePath);
-            return (reader.TotalTime, reader.WaveFormat.SampleRate, reader.WaveFormat.Channels,
-                    reader.WaveFormat.AverageBytesPerSecond * 8, reader.WaveFormat.Encoding.ToString());
-        }
-
-        // تشغيل مباشر من الذاكرة
+        /// <summary>Plays raw float samples directly from memory (no temp file needed).</summary>
         public void PlayFromMemory(float[] samples, int sampleRate, int channels)
         {
             Stop();
+
+            // Convert float [-1,1] to 16-bit PCM
             byte[] pcmData = new byte[samples.Length * 2];
             for (int i = 0; i < samples.Length; i++)
             {
-                short shortSample = (short)(samples[i] * short.MaxValue);
-                byte[] bytes = BitConverter.GetBytes(shortSample);
-                pcmData[i * 2] = bytes[0];
-                pcmData[i * 2 + 1] = bytes[1];
+                short s = (short)Math.Clamp((int)(samples[i] * short.MaxValue),
+                                             short.MinValue, short.MaxValue);
+                pcmData[i * 2]     = (byte)(s & 0xFF);
+                pcmData[i * 2 + 1] = (byte)(s >> 8);
             }
-            var memoryStream = new MemoryStream(pcmData);
-            var waveFormat = new WaveFormat(sampleRate, channels);
-            var waveProvider = new RawSourceWaveStream(memoryStream, waveFormat);
+
+            var ms           = new MemoryStream(pcmData);
+            var waveFormat   = new WaveFormat(sampleRate, 16, channels);
+            var waveProvider = new RawSourceWaveStream(ms, waveFormat);
+
             _waveOut = new WaveOutEvent();
             _waveOut.Init(waveProvider);
             _waveOut.Play();
+        }
+
+        // ── Properties ────────────────────────────────────────────────────────
+
+        public (TimeSpan duration, int sampleRate, int channels, int bitRate, string codec)
+            GetProperties(string filePath)
+        {
+            using var reader = new AudioFileReader(filePath);
+            return (
+                reader.TotalTime,
+                reader.WaveFormat.SampleRate,
+                reader.WaveFormat.Channels,
+                reader.WaveFormat.AverageBytesPerSecond * 8,
+                reader.WaveFormat.Encoding.ToString()
+            );
         }
     }
 }
