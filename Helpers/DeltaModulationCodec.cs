@@ -33,21 +33,23 @@ namespace AudioCompressor.Helpers
         /// </param>
         public static byte[] Encode(
             float[] samples, float stepSize = 0.05f,
-            CancellationToken token = default)
+            int channels = 1, CancellationToken token = default)
         {
+            ValidateArgs(stepSize, channels);
             byte[] encoded = new byte[(samples.Length + 7) / 8];
-            float  prev    = 0f;
+            float[] prev   = new float[channels];
 
             for (int i = 0; i < samples.Length; i++)
             {
                 if (token.IsCancellationRequested)
                     throw new OperationCanceledException(token);
 
-                int bit = samples[i] > prev ? 1 : 0;
+                int channel = i % channels;
+                int bit = samples[i] > prev[channel] ? 1 : 0;
                 if (bit == 1) encoded[i / 8] |= (byte)(1 << (i % 8));
 
-                prev  += bit == 1 ? stepSize : -stepSize;
-                prev   = Math.Clamp(prev, -1f, 1f);
+                prev[channel] += bit == 1 ? stepSize : -stepSize;
+                prev[channel]  = Math.Clamp(prev[channel], -1f, 1f);
             }
 
             return encoded;
@@ -64,21 +66,32 @@ namespace AudioCompressor.Helpers
         ///   This prevents padding bits from being decoded as samples.
         /// </param>
         /// <param name="stepSize">Must match the value used during encoding.</param>
-        public static float[] Decode(byte[] encoded, int sampleCount, float stepSize = 0.05f)
+        public static float[] Decode(
+            byte[] encoded, int sampleCount, float stepSize = 0.05f, int channels = 1)
         {
+            ValidateArgs(stepSize, channels);
             float[] samples = new float[sampleCount];
-            float   prev    = 0f;
+            float[] prev    = new float[channels];
 
             for (int i = 0; i < sampleCount; i++)
             {
+                int channel = i % channels;
                 int bit = (encoded[i / 8] >> (i % 8)) & 1;
 
-                prev     += bit == 1 ? stepSize : -stepSize;
-                prev      = Math.Clamp(prev, -1f, 1f);
-                samples[i] = prev;
+                prev[channel] += bit == 1 ? stepSize : -stepSize;
+                prev[channel]  = Math.Clamp(prev[channel], -1f, 1f);
+                samples[i]     = prev[channel];
             }
 
             return samples;
+        }
+
+        private static void ValidateArgs(float stepSize, int channels)
+        {
+            if (stepSize <= 0)
+                throw new ArgumentOutOfRangeException(nameof(stepSize), "stepSize must be > 0.");
+            if (channels < 1)
+                throw new ArgumentOutOfRangeException(nameof(channels), "channels must be >= 1.");
         }
     }
 }

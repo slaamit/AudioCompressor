@@ -55,9 +55,21 @@
                         <ComboBox ItemsSource="{Binding Algorithms}" SelectedItem="{Binding SelectedAlgorithm}" Width="200" Margin="5"/>
                     </StackPanel>
                     <StackPanel Orientation="Horizontal">
-                        <TextBlock Text="Quantization Levels:" VerticalAlignment="Center" Margin="5"/>
-                        <TextBox Text="{Binding QuantizationLevels}" Width="100" Margin="5"/>
+                        <TextBlock Text="Target Sample Rate:" VerticalAlignment="Center" Margin="5"/>
+                        <ComboBox ItemsSource="{Binding SampleRateOptions}" SelectedItem="{Binding SelectedSampleRateOption}" Width="100" Margin="5"/>
+                        <TextBlock Text="Lower rate = smaller file, lower quality" VerticalAlignment="Center" Margin="5" Foreground="Gray"/>
                     </StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Bits per sample:" VerticalAlignment="Center" Margin="5"/>
+                        <TextBox Text="{Binding QuantizationBits, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="5"/>
+                        <TextBlock Text="DPCM/Predictive only" VerticalAlignment="Center" Margin="5" Foreground="Gray"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Predictor Order:" VerticalAlignment="Center" Margin="5"/>
+                        <TextBox Text="{Binding PredictorOrder, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="5"/>
+                        <TextBlock Text="Predictive only" VerticalAlignment="Center" Margin="5" Foreground="Gray"/>
+                    </StackPanel>
+                    <TextBlock Text="{Binding SettingsHelpText}" Margin="5" Foreground="Gray" TextWrapping="Wrap"/>
                     <Button Command="{Binding CompressCommand}" Content="Compress" Padding="10,5" Margin="5" Background="LightGreen"/>
                 </StackPanel>
             </GroupBox>
@@ -67,7 +79,7 @@
                 <ProgressBar Height="25" Value="{Binding ProgressValue}" Minimum="0" Maximum="100"/>
                 <TextBlock Text="{Binding StatusMessage}" Margin="5" FontWeight="Bold"/>
                 <StackPanel Orientation="Horizontal" Margin="5">
-                    <TextBlock Text="Compression Ratio: " FontWeight="Bold"/>
+                    <TextBlock Text="Saving vs File: " FontWeight="Bold"/>
                     <TextBlock Text="{Binding CompressionRatioText}" Width="80"/>
                     <TextBlock Text="    Speed: " FontWeight="Bold" Margin="20,0,0,0"/>
                     <TextBlock Text="{Binding SpeedText}" Width="120"/>
@@ -75,7 +87,7 @@
             </StackPanel>
 
             <!-- التقرير والرسم البياني -->
-            <GroupBox Header="Compression Report Graph" Grid.Row="5" Margin="0,5">
+            <GroupBox Header="Compression Report and Metrics Graph" Grid.Row="5" Margin="0,5">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>

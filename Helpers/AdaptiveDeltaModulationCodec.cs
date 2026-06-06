@@ -34,32 +34,39 @@ namespace AudioCompressor.Helpers
         public static byte[] Encode(
             float[] samples,
             float minStep = 0.02f, float maxStep = 0.2f, float alpha = 1.5f,
-            CancellationToken token = default)
+            int channels = 1, CancellationToken token = default)
         {
+            ValidateArgs(minStep, maxStep, alpha, channels);
             byte[] encoded  = new byte[(samples.Length + 7) / 8];
-            float  prev     = 0f;
-            float  step     = minStep;
-            int    prevBit1 = 0, prevBit2 = 0;
+            float[] prev     = new float[channels];
+            float[] step     = new float[channels];
+            int[]   prevBit1 = new int[channels];
+            int[]   prevBit2 = new int[channels];
+
+            for (int channel = 0; channel < channels; channel++)
+                step[channel] = minStep;
 
             for (int i = 0; i < samples.Length; i++)
             {
                 if (token.IsCancellationRequested)
                     throw new OperationCanceledException(token);
 
-                int bit = samples[i] > prev ? 1 : 0;
+                int channel = i % channels;
+                int sampleIndexForChannel = i / channels;
+                int bit = samples[i] > prev[channel] ? 1 : 0;
                 if (bit == 1) encoded[i / 8] |= (byte)(1 << (i % 8));
 
-                prev  += bit == 1 ? step : -step;
-                prev   = Math.Clamp(prev, -1f, 1f);
+                prev[channel] += bit == 1 ? step[channel] : -step[channel];
+                prev[channel]  = Math.Clamp(prev[channel], -1f, 1f);
 
                 // Adapt step using local history (no byte re-reads).
-                if (i >= 2)
-                    step = (bit == prevBit1 && prevBit1 == prevBit2)
-                        ? Math.Min(maxStep, step * alpha)
-                        : Math.Max(minStep, step / alpha);
+                if (sampleIndexForChannel >= 2)
+                    step[channel] = (bit == prevBit1[channel] && prevBit1[channel] == prevBit2[channel])
+                        ? Math.Min(maxStep, step[channel] * alpha)
+                        : Math.Max(minStep, step[channel] / alpha);
 
-                prevBit2 = prevBit1;
-                prevBit1 = bit;
+                prevBit2[channel] = prevBit1[channel];
+                prevBit1[channel] = bit;
             }
 
             return encoded;
@@ -75,31 +82,51 @@ namespace AudioCompressor.Helpers
         /// <param name="sampleCount">Exact original sample count from the file header.</param>
         public static float[] Decode(
             byte[] encoded, int sampleCount,
-            float minStep = 0.02f, float maxStep = 0.2f, float alpha = 1.5f)
+            float minStep = 0.02f, float maxStep = 0.2f, float alpha = 1.5f,
+            int channels = 1)
         {
+            ValidateArgs(minStep, maxStep, alpha, channels);
             float[] samples  = new float[sampleCount];
-            float   prev     = 0f;
-            float   step     = minStep;
-            int     prevBit1 = 0, prevBit2 = 0;
+            float[] prev     = new float[channels];
+            float[] step     = new float[channels];
+            int[]   prevBit1 = new int[channels];
+            int[]   prevBit2 = new int[channels];
+
+            for (int channel = 0; channel < channels; channel++)
+                step[channel] = minStep;
 
             for (int i = 0; i < sampleCount; i++)
             {
+                int channel = i % channels;
+                int sampleIndexForChannel = i / channels;
                 int bit = (encoded[i / 8] >> (i % 8)) & 1;
 
-                prev     += bit == 1 ? step : -step;
-                prev      = Math.Clamp(prev, -1f, 1f);
-                samples[i] = prev;
+                prev[channel] += bit == 1 ? step[channel] : -step[channel];
+                prev[channel]  = Math.Clamp(prev[channel], -1f, 1f);
+                samples[i]     = prev[channel];
 
-                if (i >= 2)
-                    step = (bit == prevBit1 && prevBit1 == prevBit2)
-                        ? Math.Min(maxStep, step * alpha)
-                        : Math.Max(minStep, step / alpha);
+                if (sampleIndexForChannel >= 2)
+                    step[channel] = (bit == prevBit1[channel] && prevBit1[channel] == prevBit2[channel])
+                        ? Math.Min(maxStep, step[channel] * alpha)
+                        : Math.Max(minStep, step[channel] / alpha);
 
-                prevBit2 = prevBit1;
-                prevBit1 = bit;
+                prevBit2[channel] = prevBit1[channel];
+                prevBit1[channel] = bit;
             }
 
             return samples;
+        }
+
+        private static void ValidateArgs(float minStep, float maxStep, float alpha, int channels)
+        {
+            if (minStep <= 0)
+                throw new ArgumentOutOfRangeException(nameof(minStep), "minStep must be > 0.");
+            if (maxStep < minStep)
+                throw new ArgumentOutOfRangeException(nameof(maxStep), "maxStep must be >= minStep.");
+            if (alpha <= 1)
+                throw new ArgumentOutOfRangeException(nameof(alpha), "alpha must be > 1.");
+            if (channels < 1)
+                throw new ArgumentOutOfRangeException(nameof(channels), "channels must be >= 1.");
         }
     }
 }

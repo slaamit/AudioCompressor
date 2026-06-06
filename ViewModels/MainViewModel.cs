@@ -26,12 +26,27 @@ namespace AudioCompressor.ViewModels
         private float[]?   _originalSamples;
         private long        _originalFileSizeBytes;   // actual file size on disk
         private float[]?   _processedSamples;
-        private byte[]?    _loadedCompressedData;
-        private CompressedFileHeader.AlgoId _loadedAlgo;
-        private int  _loadedBits;
-        private int  _loadedSampleCount;
-        private int  _loadedOrder;
+        private WaveFormat? _processedFormat;
+        private byte[]?    _compressedPayload;
+        private CompressionSettings? _compressedSettings;
+        private string _compressedFileExtension = ".acmp";
+        private string _compressedFileBaseName = "compressed_audio";
         private CancellationTokenSource? _cts;
+        private bool _suppressSettingsInvalidation;
+
+        private const float DeltaStepSize = 0.05f;
+        private const float AdaptiveMinStep = 0.02f;
+        private const float AdaptiveMaxStep = 0.2f;
+        private const float AdaptiveAlpha = 1.5f;
+
+        private sealed record CompressionSettings(
+            string Algorithm,
+            CompressedFileHeader.AlgoId AlgoId,
+            int Bits,
+            int SampleCount,
+            int SampleRate,
+            int Channels,
+            int Order);
 
         // ── UI properties ────────────────────────────────────────────────────
 
@@ -44,14 +59,49 @@ namespace AudioCompressor.ViewModels
         private string _statusMessage = "Ready.";
         public  string  StatusMessage { get => _statusMessage; set { _statusMessage = value; OnPropertyChanged(); } }
 
-        private string _selectedAlgorithm = "Nonlinear Quantization";
-        public  string  SelectedAlgorithm { get => _selectedAlgorithm; set { _selectedAlgorithm = value; OnPropertyChanged(); } }
+        private string _selectedAlgorithm = "Adaptive Delta Modulation";
+        public  string  SelectedAlgorithm
+        {
+            get => _selectedAlgorithm;
+            set
+            {
+                _selectedAlgorithm = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(SettingsHelpText));
+                InvalidateCompressedResult();
+            }
+        }
 
-        private int _newSampleRate = 44100;
-        public  int  NewSampleRate { get => _newSampleRate; set { _newSampleRate = value; OnPropertyChanged(); } }
+        private int _quantizationBits = 4;
+        public  int  QuantizationBits
+        {
+            get => _quantizationBits;
+            set { _quantizationBits = value; OnPropertyChanged(); InvalidateCompressedResult(); }
+        }
 
-        private int _quantizationLevels = 256;
-        public  int  QuantizationLevels { get => _quantizationLevels; set { _quantizationLevels = value; OnPropertyChanged(); } }
+        private int _predictorOrder = 2;
+        public  int  PredictorOrder
+        {
+            get => _predictorOrder;
+            set { _predictorOrder = value; OnPropertyChanged(); InvalidateCompressedResult(); }
+        }
+
+        private string _selectedSampleRateOption = "Original";
+        public string SelectedSampleRateOption
+        {
+            get => _selectedSampleRateOption;
+            set { _selectedSampleRateOption = value; OnPropertyChanged(); InvalidateCompressedResult(); }
+        }
+
+        public string SettingsHelpText => SelectedAlgorithm switch
+        {
+            "Nonlinear Quantization" => "Uses fixed 8-bit mu-law quantization. Good against WAV/PCM, often larger than MP3/FLAC.",
+            "DPCM" => "Uses Bits per sample. Lower bits = smaller file and lower quality. Valid range: 1 to 8.",
+            "Predictive Differential Coding" => "Uses Bits per sample and Predictor order. Lower bits = smaller file. Valid range: 1 to 8.",
+            "Delta Modulation" => "Uses fixed 1-bit delta modulation. Small output, lower quality.",
+            "Adaptive Delta Modulation" => "Uses fixed 1-bit adaptive delta modulation. Smallest default output.",
+            _ => ""
+        };
 
         public ObservableCollection<string> Algorithms { get; } = new()
         {
@@ -60,6 +110,15 @@ namespace AudioCompressor.ViewModels
             "Predictive Differential Coding",
             "Delta Modulation",
             "Adaptive Delta Modulation"
+        };
+
+        public ObservableCollection<string> SampleRateOptions { get; } = new()
+        {
+            "Original",
+            "44100",
+            "22050",
+            "16000",
+            "8000"
         };
 
         private PlotModel? _waveformModel;
@@ -103,10 +162,11 @@ namespace AudioCompressor.ViewModels
             DecompressLoadedCommand   = new RelayCommand(ExecuteDecompressLoaded);
             PlayDecompressedCommand   = new RelayCommand(ExecutePlayDecompressed);
 
-            CompressionPlotModel = new PlotModel { Title = "Compression Progress" };
+            CompressionPlotModel = new PlotModel { Title = "Compression Metrics" };
             CompressionPlotModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Progress (%)" });
-            CompressionPlotModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left,   Title = "%" });
-            CompressionPlotModel.Series.Add(new LineSeries { Title = "Progress", Color = OxyColors.Blue });
+            CompressionPlotModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left,   Title = "Value" });
+            CompressionPlotModel.Series.Add(new LineSeries { Title = "Saving vs PCM (%)", Color = OxyColors.Green });
+            CompressionPlotModel.Series.Add(new LineSeries { Title = "Speed (KB/s)", Color = OxyColors.Orange });
 
             WaveformModel = new PlotModel { Title = "Audio Waveform" };
             WaveformModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Sample" });
@@ -124,6 +184,44 @@ namespace AudioCompressor.ViewModels
             WaveformModel!.Series.Clear();
             WaveformModel.Series.Add(series);
             WaveformModel.InvalidatePlot(true);
+        }
+
+        private void InvalidateCompressedResult()
+        {
+            if (_suppressSettingsInvalidation ||
+                _compressedPayload == null ||
+                _originalSamples == null)
+                return;
+
+            _compressedPayload = null;
+            _compressedSettings = null;
+            _processedSamples = null;
+            _processedFormat = null;
+            CompressionRatioText = "N/A";
+            ReportText = "Compression settings changed. Compress again before saving.";
+            StatusMessage = "Settings changed. Compress again before saving or playback.";
+            BuildWaveform(_originalSamples);
+        }
+
+        private void ClearCompressionPlot()
+        {
+            foreach (var series in CompressionPlotModel.Series)
+                if (series is LineSeries line)
+                    line.Points.Clear();
+
+            CompressionPlotModel.InvalidatePlot(true);
+        }
+
+        private void AddCompressionMetricPoint(int progress, double savingVsPcm, double speedKbPerSecond)
+        {
+            if (CompressionPlotModel.Series.Count < 2) return;
+
+            if (CompressionPlotModel.Series[0] is LineSeries savingSeries)
+                savingSeries.Points.Add(new DataPoint(progress, savingVsPcm));
+            if (CompressionPlotModel.Series[1] is LineSeries speedSeries)
+                speedSeries.Points.Add(new DataPoint(progress, speedKbPerSecond));
+
+            CompressionPlotModel.InvalidatePlot(true);
         }
 
         // ── Load ─────────────────────────────────────────────────────────────
@@ -153,15 +251,19 @@ namespace AudioCompressor.ViewModels
                     $"Duration: {props.duration:mm\\:ss}\n" +
                     $"Sample Rate: {props.sampleRate} Hz\n" +
                     $"Channels: {props.channels}\n" +
-                    $"Bit Rate: {props.bitRate / 1000} kbps\n" +
-                    $"Codec: {props.codec}";
+                    $"Decoded Stream Rate: {props.bitRate / 1000} kbps\n" +
+                    $"Decoded Format: {props.codec}";
 
                 var (format, samples, fileSizeBytes) = _audioService.LoadAudio(path);
                 _originalFormat        = format;
                 _originalSamples       = samples;
                 _originalFileSizeBytes = fileSizeBytes;  // store real file size
                 _processedSamples      = null;
-                _loadedCompressedData  = null;
+                _processedFormat       = null;
+                _compressedPayload     = null;
+                _compressedSettings    = null;
+                _compressedFileExtension = GetPreferredCompressedExtension(path);
+                _compressedFileBaseName = $"{Path.GetFileNameWithoutExtension(path)}_compressed";
 
                 BuildWaveform(samples);
                 StatusMessage        = "Audio loaded successfully.";
@@ -169,8 +271,7 @@ namespace AudioCompressor.ViewModels
                 CompressionRatioText = "N/A";
                 SpeedText            = "N/A";
                 ProgressValue        = 0;
-                (CompressionPlotModel.Series[0] as LineSeries)?.Points.Clear();
-                CompressionPlotModel.InvalidatePlot(true);
+                ClearCompressionPlot();
             }
             catch (Exception ex) { StatusMessage = $"Error loading file: {ex.Message}"; }
         }
@@ -198,22 +299,31 @@ namespace AudioCompressor.ViewModels
             _cts = new CancellationTokenSource();
             var token = _cts.Token;
 
+            CompressionSettings settings;
+            float[] samples;
+            try
+            {
+                var prepared = PrepareSamplesForCompression(_originalSamples, _originalFormat);
+                samples = prepared.samples;
+                settings = CreateSettings(samples.Length, prepared.sampleRate, _originalFormat.Channels);
+            }
+            catch (Exception ex)
+            {
+                StatusMessage = ex.Message;
+                return;
+            }
+
             StatusMessage        = "Compressing…";
             ProgressValue        = 0;
-            CompressionRatioText = "0%";
+            CompressionRatioText = "Calculating...";
             SpeedText            = "0 KB/s";
-            (CompressionPlotModel.Series[0] as LineSeries)?.Points.Clear();
-            CompressionPlotModel.InvalidatePlot(true);
+            ClearCompressionPlot();
 
             var  sw           = Stopwatch.StartNew();
 
             // Use the real file size on disk as the "original" size baseline.
             // This gives a meaningful ratio vs what the user actually had on disk.
             long originalSize = _originalFileSizeBytes;
-            int  bits         = (int)Math.Log2(QuantizationLevels);
-            int  sampleCount  = _originalSamples.Length;
-            var  samples      = _originalSamples;
-            var  algo         = SelectedAlgorithm;
 
             byte[]?    compressedData = null;
             float[]?   decompressed   = null;
@@ -228,28 +338,35 @@ namespace AudioCompressor.ViewModels
             {
                 try
                 {
-                    void ReportProgress(int pct)
+                    void ReportProgress(int pct, double savingVsPcm, double speedKbPerSecond)
                     {
                         if (token.IsCancellationRequested) return;
-                        double speed = originalSize / 1024.0 / (sw.Elapsed.TotalSeconds + 0.001);
                         App.Current.Dispatcher.InvokeAsync(() =>
                         {
                             if (token.IsCancellationRequested) return;
                             ProgressValue        = pct;
-                            CompressionRatioText = $"{pct}%";
-                            SpeedText            = $"{speed:F0} KB/s";
-                            (CompressionPlotModel.Series[0] as LineSeries)
-                                ?.Points.Add(new DataPoint(pct, pct));
-                            CompressionPlotModel.InvalidatePlot(true);
+                            CompressionRatioText = $"{savingVsPcm:F1}%";
+                            SpeedText            = $"{speedKbPerSecond:F0} KB/s";
+                            AddCompressionMetricPoint(pct, savingVsPcm, speedKbPerSecond);
                         });
                     }
 
-                    compressedData = Encode(algo, samples, bits, token);
+                    compressedData = Encode(settings, samples, token);
                     token.ThrowIfCancellationRequested();
 
-                    for (int p = 5; p <= 100; p += 5) ReportProgress(p);
+                    long finalCompressedSize = compressedData.Length + CompressedFileHeader.Size;
+                    long decodedPcm16Size = 44 + (long)settings.SampleCount * 2;
 
-                    decompressed = Decode(algo, compressedData, bits, sampleCount);
+                    for (int p = 5; p <= 100; p += 5)
+                    {
+                        double estimatedCompressedSize = finalCompressedSize * (p / 100.0);
+                        double savingVsPcm = (1.0 - estimatedCompressedSize / decodedPcm16Size) * 100.0;
+                        double processedKb = decodedPcm16Size / 1024.0 * (p / 100.0);
+                        double speed = processedKb / (sw.Elapsed.TotalSeconds + 0.001);
+                        ReportProgress(p, savingVsPcm, speed);
+                    }
+
+                    decompressed = Decode(settings, compressedData);
                     token.ThrowIfCancellationRequested();
                 }
                 catch (OperationCanceledException)
@@ -275,8 +392,7 @@ namespace AudioCompressor.ViewModels
                 ProgressValue        = 0;
                 CompressionRatioText = "N/A";
                 SpeedText            = "N/A";
-                (CompressionPlotModel.Series[0] as LineSeries)?.Points.Clear();
-                CompressionPlotModel.InvalidatePlot(true);
+                ClearCompressionPlot();
                 return;
             }
 
@@ -288,50 +404,174 @@ namespace AudioCompressor.ViewModels
 
             // ── Success ───────────────────────────────────────────────────────
             _processedSamples = decompressed;
+            _processedFormat = new WaveFormat(settings.SampleRate, settings.Channels);
+            _compressedPayload = compressedData;
+            _compressedSettings = settings;
 
-            long   compressedSize = compressedData!.Length;
+            long compressedSize = compressedData!.Length + CompressedFileHeader.Size;
+            long decodedPcm16Size = 44 + (long)settings.SampleCount * 2;
 
-            // Saving ratio: how much smaller is the compressed payload vs the
-            // original file on disk.  A positive value means the file shrank.
-            double savingRatio = (1.0 - (double)compressedSize / originalSize) * 100.0;
+            double diskSavingRatio = (1.0 - (double)compressedSize / originalSize) * 100.0;
+            double pcmSavingRatio = (1.0 - (double)compressedSize / decodedPcm16Size) * 100.0;
+            double estimatedBitRate = settings.SampleRate * settings.Channels * settings.Bits / 1000.0;
+            double elapsedSeconds = Math.Max(sw.Elapsed.TotalSeconds, 0.001);
+            string note = diskSavingRatio < 0
+                ? "\nNote: The source file is already compressed on disk. Compare against decoded PCM for algorithm compression."
+                : "";
 
             ReportText =
                 $"--- Compression Report ---\n" +
-                $"Algorithm:       {SelectedAlgorithm}\n" +
+                $"Algorithm:       {settings.Algorithm}\n" +
+                $"Sampling rate:   {settings.SampleRate} Hz\n" +
+                $"Bits per sample: {settings.Bits}\n" +
+                $"Predictor order: {settings.Order}\n" +
+                $"Channels:        {settings.Channels}\n" +
+                $"Samples:         {settings.SampleCount:N0}\n" +
+                $"Estimated rate:  {estimatedBitRate:F1} kbps\n" +
                 $"Original file:   {originalSize / 1024.0:F2} KB  (on disk)\n" +
-                $"Compressed size: {compressedSize / 1024.0:F2} KB\n" +
-                $"Saving ratio:    {savingRatio:F1}%\n" +
+                $"Decoded PCM:     {decodedPcm16Size / 1024.0:F2} KB  (16-bit equivalent)\n" +
+                $"Compressed file: {compressedSize / 1024.0:F2} KB  (with header)\n" +
+                $"Saving vs file:  {diskSavingRatio:F1}%\n" +
+                $"Saving vs PCM:   {pcmSavingRatio:F1}%\n" +
                 $"Time taken:      {sw.Elapsed.TotalSeconds:F2} sec\n" +
-                $"Speed:           {originalSize / 1024.0 / sw.Elapsed.TotalSeconds:F0} KB/s";
+                $"Speed:           {originalSize / 1024.0 / elapsedSeconds:F0} KB/s" +
+                note;
 
-            StatusMessage        = $"Compressed with {SelectedAlgorithm}.";
+            StatusMessage        = $"Compressed with {settings.Algorithm}.";
             ProgressValue        = 100;
-            CompressionRatioText = "100%";
+            CompressionRatioText = $"{diskSavingRatio:F1}%";
             BuildWaveform(decompressed!);
         }
 
         // ── Encode / Decode (static — cannot accidentally touch UI thread) ────
 
-        private static byte[] Encode(string algo, float[] samples, int bits, CancellationToken token) =>
-            algo switch
+        private (float[] samples, int sampleRate) PrepareSamplesForCompression(
+            float[] samples, WaveFormat format)
+        {
+            int targetSampleRate = GetTargetSampleRate(format.SampleRate);
+            if (targetSampleRate == format.SampleRate)
+                return (samples, format.SampleRate);
+
+            return (
+                ResampleLinear(samples, format.SampleRate, targetSampleRate, format.Channels),
+                targetSampleRate);
+        }
+
+        private int GetTargetSampleRate(int originalSampleRate)
+        {
+            if (SelectedSampleRateOption == "Original")
+                return originalSampleRate;
+
+            if (!int.TryParse(SelectedSampleRateOption, out int targetSampleRate) ||
+                targetSampleRate < 8000 ||
+                targetSampleRate > 192000)
+                throw new InvalidOperationException("Target sample rate is invalid.");
+
+            return targetSampleRate;
+        }
+
+        private static float[] ResampleLinear(
+            float[] input, int sourceRate, int targetRate, int channels)
+        {
+            if (sourceRate == targetRate) return input;
+            if (channels < 1) throw new ArgumentOutOfRangeException(nameof(channels));
+
+            int sourceFrames = input.Length / channels;
+            int targetFrames = Math.Max(1, (int)Math.Round(sourceFrames * (double)targetRate / sourceRate));
+            var output = new float[targetFrames * channels];
+
+            for (int frame = 0; frame < targetFrames; frame++)
             {
-                "Nonlinear Quantization"         => MuLawCodec.Encode(samples, token),
-                "DPCM"                           => DpcmCodec.Encode(samples, bits, token),
-                "Predictive Differential Coding" => PredictiveCodec.Encode(samples, bits, 2, token),
-                "Delta Modulation"               => DeltaModulationCodec.Encode(samples, 0.05f, token),
-                "Adaptive Delta Modulation"      => AdaptiveDeltaModulationCodec.Encode(samples, 0.02f, 0.2f, 1.5f, token),
-                _ => throw new InvalidOperationException($"Unknown algorithm: {algo}")
+                double sourcePosition = frame * (double)sourceRate / targetRate;
+                int leftFrame = Math.Min((int)sourcePosition, sourceFrames - 1);
+                int rightFrame = Math.Min(leftFrame + 1, sourceFrames - 1);
+                double fraction = sourcePosition - leftFrame;
+
+                for (int channel = 0; channel < channels; channel++)
+                {
+                    float left = input[leftFrame * channels + channel];
+                    float right = input[rightFrame * channels + channel];
+                    output[frame * channels + channel] =
+                        (float)(left + (right - left) * fraction);
+                }
+            }
+
+            return output;
+        }
+
+        private CompressionSettings CreateSettings(int sampleCount, int sampleRate, int channels)
+        {
+            if (sampleCount <= 0)
+                throw new InvalidOperationException("Audio file has no samples to compress.");
+            if (channels < 1 || channels > 8)
+                throw new InvalidOperationException("Only audio with 1 to 8 channels is supported.");
+
+            var algoId = AlgoIdFromName(SelectedAlgorithm);
+            int bits = algoId switch
+            {
+                CompressedFileHeader.AlgoId.MuLaw => 8,
+                CompressedFileHeader.AlgoId.Dpcm or CompressedFileHeader.AlgoId.Predictive => QuantizationBits,
+                CompressedFileHeader.AlgoId.Delta or CompressedFileHeader.AlgoId.AdaptiveDelta => 1,
+                _ => throw new InvalidOperationException($"Unknown algorithm: {SelectedAlgorithm}")
             };
 
-        private static float[] Decode(string algo, byte[] data, int bits, int sampleCount) =>
-            algo switch
+            int order = algoId == CompressedFileHeader.AlgoId.Predictive ? PredictorOrder : 0;
+
+            if (bits < 1 || bits > 8)
+                throw new InvalidOperationException("Bits per sample must be between 1 and 8.");
+            if (order < 0 || order > 8)
+                throw new InvalidOperationException("Predictor order must be between 1 and 8.");
+            if (algoId == CompressedFileHeader.AlgoId.Predictive && order == 0)
+                throw new InvalidOperationException("Predictor order must be between 1 and 8.");
+
+            return new CompressionSettings(
+                SelectedAlgorithm,
+                algoId,
+                bits,
+                sampleCount,
+                sampleRate,
+                channels,
+                order);
+        }
+
+        private static byte[] Encode(
+            CompressionSettings settings, float[] samples, CancellationToken token) =>
+            settings.AlgoId switch
             {
-                "Nonlinear Quantization"         => MuLawCodec.Decode(data),
-                "DPCM"                           => DpcmCodec.Decode(data, bits, sampleCount),
-                "Predictive Differential Coding" => PredictiveCodec.Decode(data, bits, sampleCount, 2),
-                "Delta Modulation"               => DeltaModulationCodec.Decode(data, sampleCount, 0.05f),
-                "Adaptive Delta Modulation"      => AdaptiveDeltaModulationCodec.Decode(data, sampleCount, 0.02f, 0.2f, 1.5f),
-                _ => throw new InvalidOperationException($"Unknown algorithm: {algo}")
+                CompressedFileHeader.AlgoId.MuLaw =>
+                    MuLawCodec.Encode(samples, token),
+                CompressedFileHeader.AlgoId.Dpcm =>
+                    DpcmCodec.Encode(samples, settings.Bits, settings.Channels, token),
+                CompressedFileHeader.AlgoId.Predictive =>
+                    PredictiveCodec.Encode(samples, settings.Bits, settings.Order, settings.Channels, token),
+                CompressedFileHeader.AlgoId.Delta =>
+                    DeltaModulationCodec.Encode(samples, DeltaStepSize, settings.Channels, token),
+                CompressedFileHeader.AlgoId.AdaptiveDelta =>
+                    AdaptiveDeltaModulationCodec.Encode(
+                        samples, AdaptiveMinStep, AdaptiveMaxStep, AdaptiveAlpha,
+                        settings.Channels, token),
+                _ => throw new InvalidOperationException($"Unknown algorithm: {settings.Algorithm}")
+            };
+
+        private static float[] Decode(CompressionSettings settings, byte[] data) =>
+            settings.AlgoId switch
+            {
+                CompressedFileHeader.AlgoId.MuLaw =>
+                    MuLawCodec.Decode(data),
+                CompressedFileHeader.AlgoId.Dpcm =>
+                    DpcmCodec.Decode(data, settings.Bits, settings.SampleCount, settings.Channels),
+                CompressedFileHeader.AlgoId.Predictive =>
+                    PredictiveCodec.Decode(
+                        data, settings.Bits, settings.SampleCount,
+                        settings.Order, settings.Channels),
+                CompressedFileHeader.AlgoId.Delta =>
+                    DeltaModulationCodec.Decode(
+                        data, settings.SampleCount, DeltaStepSize, settings.Channels),
+                CompressedFileHeader.AlgoId.AdaptiveDelta =>
+                    AdaptiveDeltaModulationCodec.Decode(
+                        data, settings.SampleCount, AdaptiveMinStep, AdaptiveMaxStep,
+                        AdaptiveAlpha, settings.Channels),
+                _ => throw new InvalidOperationException($"Unknown algorithm: {settings.Algorithm}")
             };
 
         // ── Reset ─────────────────────────────────────────────────────────────
@@ -339,66 +579,103 @@ namespace AudioCompressor.ViewModels
         private void ExecuteReset()
         {
             _processedSamples     = null;
-            _loadedCompressedData = null;
+            _processedFormat      = null;
+            _compressedPayload    = null;
+            _compressedSettings   = null;
             StatusMessage         = "Reset.";
             ReportText            = "";
             CompressionRatioText  = "N/A";
             SpeedText             = "N/A";
             ProgressValue         = 0;
-            (CompressionPlotModel.Series[0] as LineSeries)?.Points.Clear();
-            CompressionPlotModel.InvalidatePlot(true);
+            ClearCompressionPlot();
+            _suppressSettingsInvalidation = true;
+            try
+            {
+                SelectedAlgorithm = "Adaptive Delta Modulation";
+                SelectedSampleRateOption = "Original";
+                QuantizationBits = 4;
+                PredictorOrder = 2;
+            }
+            finally
+            {
+                _suppressSettingsInvalidation = false;
+            }
             if (_originalSamples != null) BuildWaveform(_originalSamples);
         }
 
         // ── Save ──────────────────────────────────────────────────────────────
 
-        private void ExecuteSaveCompressed()
+        private async void ExecuteSaveCompressed()
         {
-            if (_originalSamples == null || _originalFormat == null)
-            { StatusMessage = "Load an audio file first."; return; }
+            if (_compressedPayload == null || _compressedSettings == null)
+            { StatusMessage = "Compress audio or load a compressed file first."; return; }
 
             var dlg = new SaveFileDialog
             {
-                Filter      = "Compressed Binary|*.bin",
-                FileName    = "output.bin",
+                Filter      = CreateCompressedSaveFilter(_compressedFileExtension),
+                DefaultExt  = _compressedFileExtension.TrimStart('.'),
+                AddExtension = true,
+                FileName    = $"{_compressedFileBaseName}{_compressedFileExtension}",
                 FilterIndex = 1
             };
             if (dlg.ShowDialog() != true) return;
 
             try
             {
-                int bits = (int)Math.Log2(QuantizationLevels);
+                var payload = _compressedPayload;
+                var settings = _compressedSettings;
+                byte[] header = BuildHeader(settings);
 
-                    byte[] payload = Encode(
-        SelectedAlgorithm,
-        _originalSamples,
-        bits,
-        CancellationToken.None);
-
-                    var algoId = AlgoIdFromName(SelectedAlgorithm);
-
-                    byte[] header = CompressedFileHeader.Build(
-                        algoId,
-                        bits,
-                        _originalSamples.Length,
-                        _originalFormat.SampleRate,
-                        _originalFormat.Channels,
-                        order: 2);
-
+                await Task.Run(() =>
+                {
                     using var fs = File.Create(dlg.FileName);
                     fs.Write(header);
-                    fs.Write(payload);               
+                    fs.Write(payload);
+                });
 
-                StatusMessage = $"Saved: {Path.GetFileName(dlg.FileName)}";
+                _compressedFileExtension = NormalizeExtension(Path.GetExtension(dlg.FileName));
+                _compressedFileBaseName = Path.GetFileNameWithoutExtension(dlg.FileName);
+                StatusMessage = $"Saved app-compressed file: {Path.GetFileName(dlg.FileName)}";
             }
             catch (Exception ex) { StatusMessage = $"Save failed: {ex.Message}"; }
         }
 
-        // ── Load .bin ─────────────────────────────────────────────────────────
+        private static byte[] BuildHeader(CompressionSettings settings) =>
+            CompressedFileHeader.Build(
+                settings.AlgoId,
+                settings.Bits,
+                settings.SampleCount,
+                settings.SampleRate,
+                settings.Channels,
+                settings.Order);
+
+        private static string CreateCompressedSaveFilter(string extension)
+        {
+            string label = extension.TrimStart('.').ToUpperInvariant();
+            return $"App-Compressed {label}|*{extension}|All Files|*.*";
+        }
+
+        private static string GetPreferredCompressedExtension(string? path)
+        {
+            string extension = NormalizeExtension(Path.GetExtension(path));
+            return extension is ".mp3" or ".wav" or ".aiff" or ".aif" or ".flac"
+                ? extension
+                : ".acmp";
+        }
+
+        private static string NormalizeExtension(string? extension) =>
+            string.IsNullOrWhiteSpace(extension)
+                ? ".acmp"
+                : extension.StartsWith('.') ? extension.ToLowerInvariant() : $".{extension.ToLowerInvariant()}";
+
+        // ── Load compressed file ──────────────────────────────────────────────
 
         private void ExecuteDecompressFromFile()
         {
-            var dlg = new OpenFileDialog { Filter = "Compressed Binary|*.bin" };
+            var dlg = new OpenFileDialog
+            {
+                Filter = "App-Compressed Files|*.mp3;*.wav;*.aiff;*.aif;*.flac;*.acmp;*.bin|All Files|*.*"
+            };
             if (dlg.ShowDialog() != true) return;
 
             try
@@ -406,22 +683,63 @@ namespace AudioCompressor.ViewModels
                 byte[] fileBytes = File.ReadAllBytes(dlg.FileName);
 
                 if (!CompressedFileHeader.TryParse(fileBytes,
-                        out _loadedAlgo, out _loadedBits, out _loadedSampleCount,
-                        out int sampleRate, out int channels, out _loadedOrder))
+                        out var algo, out int bits, out int sampleCount,
+                        out int sampleRate, out int channels, out int order))
                 {
                     StatusMessage = "File has no valid header. Re-save it with this application.";
                     return;
                 }
 
+                int payloadLength = fileBytes.Length - CompressedFileHeader.Size;
+                if (!CompressedFileHeader.HasValidPayloadLength(payloadLength, algo, bits, sampleCount))
+                {
+                    StatusMessage = "Compressed payload length does not match its header.";
+                    return;
+                }
+
+                var settings = new CompressionSettings(
+                    AlgoNameFromId(algo), algo, bits, sampleCount, sampleRate, channels, order);
+
                 _originalFormat = new WaveFormat(sampleRate, channels);
+                _processedFormat = new WaveFormat(sampleRate, channels);
 
-                _loadedCompressedData = new byte[fileBytes.Length - CompressedFileHeader.Size];
+                _compressedPayload = new byte[payloadLength];
                 Buffer.BlockCopy(fileBytes, CompressedFileHeader.Size,
-                                 _loadedCompressedData, 0, _loadedCompressedData.Length);
+                                 _compressedPayload, 0, _compressedPayload.Length);
+                _compressedSettings = settings;
 
-                SelectedAlgorithm = AlgoNameFromId(_loadedAlgo);
+                _currentFilePath = null;
+                _originalSamples = null;
+                _processedSamples = null;
+                _originalFileSizeBytes = 0;
+                _compressedFileExtension = NormalizeExtension(Path.GetExtension(dlg.FileName));
+                _compressedFileBaseName = $"{Path.GetFileNameWithoutExtension(dlg.FileName)}_copy";
+
+                _suppressSettingsInvalidation = true;
+                try
+                {
+                    SelectedAlgorithm = settings.Algorithm;
+                    QuantizationBits = settings.Bits;
+                    PredictorOrder = settings.Order > 0 ? settings.Order : 2;
+                    SelectedSampleRateOption = SampleRateOptions.Contains(settings.SampleRate.ToString())
+                        ? settings.SampleRate.ToString()
+                        : "Original";
+                }
+                finally
+                {
+                    _suppressSettingsInvalidation = false;
+                }
+                WaveformModel?.Series.Clear();
+                WaveformModel?.InvalidatePlot(true);
+                AudioInfo =
+                    $"Compressed file: {Path.GetFileName(dlg.FileName)}\n" +
+                    $"Size: {fileBytes.Length / 1024.0:F2} KB\n" +
+                    $"Algorithm: {settings.Algorithm}\n" +
+                    $"Sample Rate: {settings.SampleRate} Hz\n" +
+                    $"Channels: {settings.Channels}\n" +
+                    $"Samples: {settings.SampleCount:N0}";
                 StatusMessage = $"Loaded {Path.GetFileName(dlg.FileName)} " +
-                                $"({_loadedSampleCount:N0} samples, {AlgoNameFromId(_loadedAlgo)}). " +
+                                $"({settings.SampleCount:N0} samples, {settings.Algorithm}). " +
                                 "Click 'Decompress Loaded'.";
             }
             catch (Exception ex) { StatusMessage = $"Error: {ex.Message}"; }
@@ -431,18 +749,15 @@ namespace AudioCompressor.ViewModels
 
         private void ExecuteDecompressLoaded()
         {
-            if (_loadedCompressedData == null)
+            if (_compressedPayload == null || _compressedSettings == null)
             { StatusMessage = "No compressed file loaded."; return; }
 
             try
             {
-                float[] decompressed = Decode(
-                    AlgoNameFromId(_loadedAlgo),
-                    _loadedCompressedData,
-                    _loadedBits,
-                    _loadedSampleCount);
+                float[] decompressed = Decode(_compressedSettings, _compressedPayload);
 
                 _processedSamples = decompressed;
+                _processedFormat = new WaveFormat(_compressedSettings.SampleRate, _compressedSettings.Channels);
                 BuildWaveform(decompressed);
                 StatusMessage = "Decompressed. Click 'Play Decompressed' to listen.";
             }
@@ -453,41 +768,13 @@ namespace AudioCompressor.ViewModels
 
         private void ExecutePlayDecompressed()
         {
-            if (_processedSamples == null || _originalFormat == null)
+            if (_processedSamples == null || _processedFormat == null)
             { StatusMessage = "No decompressed audio available."; return; }
             _audioService.PlayFromMemory(
                 _processedSamples,
-                _originalFormat.SampleRate,
-                _originalFormat.Channels);
+                _processedFormat.SampleRate,
+                _processedFormat.Channels);
             StatusMessage = "Playing decompressed audio.";
-        }
-
-        // ── WAV writer ────────────────────────────────────────────────────────
-
-        private static void SaveWav(string path, float[] samples, int sampleRate, int channels)
-        {
-            int dataBytes = samples.Length * 2;
-            using var ms     = new MemoryStream(44 + dataBytes);
-            using var writer = new BinaryWriter(ms);
-
-            writer.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"));
-            writer.Write(36 + dataBytes);
-            writer.Write(System.Text.Encoding.ASCII.GetBytes("WAVEfmt "));
-            writer.Write(16);
-            writer.Write((short)1);                    // PCM
-            writer.Write((short)channels);
-            writer.Write(sampleRate);
-            writer.Write(sampleRate * channels * 2);   // byte rate
-            writer.Write((short)(channels * 2));       // block align
-            writer.Write((short)16);                   // bits per sample
-            writer.Write(System.Text.Encoding.ASCII.GetBytes("data"));
-            writer.Write(dataBytes);
-
-            foreach (float s in samples)
-                writer.Write((short)Math.Clamp(
-                    (int)(s * short.MaxValue), short.MinValue, short.MaxValue));
-
-            File.WriteAllBytes(path, ms.ToArray());
         }
 
         // ── Algorithm ID mapping ──────────────────────────────────────────────

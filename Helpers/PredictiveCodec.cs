@@ -29,20 +29,24 @@ namespace AudioCompressor.Helpers
         /// <param name="bits">Bits per residual (1–8).</param>
         /// <param name="order">Predictor order — how many past samples to use (default 2).</param>
         public static byte[] Encode(
-            float[] samples, int bits, int order = 2,
+            float[] samples, int bits, int order = 2, int channels = 1,
             CancellationToken token = default)
         {
-            ValidateArgs(bits, order);
+            ValidateArgs(bits, order, channels);
             int     maxVal  = (1 << bits) - 1;
             var     writer  = new BitWriter();
-            float[] history = new float[order];   // ring of reconstructed samples
+            float[][] history = CreateHistory(channels, order);
 
             for (int i = 0; i < samples.Length; i++)
             {
                 if (token.IsCancellationRequested)
                     throw new OperationCanceledException(token);
 
-                float predicted = Predict(history, Math.Min(i, order));
+                int channel = i % channels;
+                int samplesAlreadySeenForChannel = i / channels;
+                float predicted = Predict(
+                    history[channel],
+                    Math.Min(samplesAlreadySeenForChannel, order));
                 float diff      = samples[i] - predicted;
 
                 int q = (int)Math.Round((diff + 2.0) / 4.0 * maxVal);
@@ -53,7 +57,7 @@ namespace AudioCompressor.Helpers
                 float dequant      = (float)((double)q / maxVal * 4.0 - 2.0);
                 float reconstructed = Math.Clamp(predicted + dequant, -1f, 1f);
 
-                ShiftHistory(history, reconstructed, order);
+                ShiftHistory(history[channel], reconstructed, order);
             }
 
             return writer.ToArray();
@@ -68,22 +72,27 @@ namespace AudioCompressor.Helpers
         /// <param name="bits">Must match the value used during encoding.</param>
         /// <param name="sampleCount">Original sample count (stored in file header).</param>
         /// <param name="order">Must match the value used during encoding.</param>
-        public static float[] Decode(byte[] encoded, int bits, int sampleCount, int order = 2)
+        public static float[] Decode(
+            byte[] encoded, int bits, int sampleCount, int order = 2, int channels = 1)
         {
-            ValidateArgs(bits, order);
+            ValidateArgs(bits, order, channels);
             int     maxVal  = (1 << bits) - 1;
             var     reader  = new BitReader(encoded);
             float[] samples = new float[sampleCount];
-            float[] history = new float[order];
+            float[][] history = CreateHistory(channels, order);
 
             for (int i = 0; i < sampleCount; i++)
             {
-                float predicted = Predict(history, Math.Min(i, order));
+                int channel = i % channels;
+                int samplesAlreadySeenForChannel = i / channels;
+                float predicted = Predict(
+                    history[channel],
+                    Math.Min(samplesAlreadySeenForChannel, order));
                 int   q         = reader.ReadBits(bits);
                 float dequant   = (float)((double)q / maxVal * 4.0 - 2.0);
                 float sample    = Math.Clamp(predicted + dequant, -1f, 1f);
                 samples[i]      = sample;
-                ShiftHistory(history, sample, order);
+                ShiftHistory(history[channel], sample, order);
             }
 
             return samples;
@@ -121,14 +130,24 @@ namespace AudioCompressor.Helpers
             history[order - 1] = newSample;
         }
 
+        private static float[][] CreateHistory(int channels, int order)
+        {
+            var history = new float[channels][];
+            for (int i = 0; i < channels; i++)
+                history[i] = new float[order];
+            return history;
+        }
+
         // ── Validation ────────────────────────────────────────────────────────
 
-        private static void ValidateArgs(int bits, int order)
+        private static void ValidateArgs(int bits, int order, int channels)
         {
             if (bits < 1 || bits > 8)
                 throw new ArgumentOutOfRangeException(nameof(bits), "bits must be 1–8.");
             if (order < 1)
                 throw new ArgumentOutOfRangeException(nameof(order), "order must be >= 1.");
+            if (channels < 1)
+                throw new ArgumentOutOfRangeException(nameof(channels), "channels must be >= 1.");
         }
     }
 }

@@ -28,19 +28,23 @@ namespace AudioCompressor.Helpers
         /// </summary>
         /// <param name="samples">Normalized float samples.</param>
         /// <param name="bits">Bits per residual value (1–8).</param>
-        public static byte[] Encode(float[] samples, int bits, CancellationToken token = default)
+        public static byte[] Encode(
+            float[] samples, int bits, int channels = 1,
+            CancellationToken token = default)
         {
             ValidateBits(bits);
+            ValidateChannels(channels);
             int       maxVal   = (1 << bits) - 1;
             var       writer   = new BitWriter();
-            float     prev     = 0f;
+            float[]   prev     = new float[channels];
 
             for (int i = 0; i < samples.Length; i++)
             {
                 if (token.IsCancellationRequested)
                     throw new OperationCanceledException(token);
 
-                float diff = samples[i] - prev;
+                int   channel = i % channels;
+                float diff    = samples[i] - prev[channel];
 
                 // Map diff range [-2, +2] → [0, maxVal].
                 // Actual diff range is [-1-(-1), 1-(-1)] = [-2, +2] in the worst case.
@@ -50,7 +54,7 @@ namespace AudioCompressor.Helpers
 
                 // Reconstruct exactly as the decoder will, to keep encoder/decoder in sync.
                 float dequant = (float)((double)q / maxVal * 4.0 - 2.0);
-                prev = Math.Clamp(prev + dequant, -1f, 1f);
+                prev[channel] = Math.Clamp(prev[channel] + dequant, -1f, 1f);
             }
 
             return writer.ToArray();
@@ -64,21 +68,24 @@ namespace AudioCompressor.Helpers
         /// <param name="encoded">Bit-packed payload (no header).</param>
         /// <param name="bits">Must match the value used during encoding.</param>
         /// <param name="sampleCount">Original sample count (stored in file header).</param>
-        public static float[] Decode(byte[] encoded, int bits, int sampleCount)
+        public static float[] Decode(
+            byte[] encoded, int bits, int sampleCount, int channels = 1)
         {
             ValidateBits(bits);
+            ValidateChannels(channels);
             int     maxVal  = (1 << bits) - 1;
             var     reader  = new BitReader(encoded);
             float[] samples = new float[sampleCount];
-            float   prev    = 0f;
+            float[] prev    = new float[channels];
 
             for (int i = 0; i < sampleCount; i++)
             {
+                int   channel = i % channels;
                 int   q       = reader.ReadBits(bits);
                 float dequant = (float)((double)q / maxVal * 4.0 - 2.0);
-                float sample  = Math.Clamp(prev + dequant, -1f, 1f);
+                float sample  = Math.Clamp(prev[channel] + dequant, -1f, 1f);
                 samples[i]    = sample;
-                prev          = sample;
+                prev[channel] = sample;
             }
 
             return samples;
@@ -90,6 +97,12 @@ namespace AudioCompressor.Helpers
         {
             if (bits < 1 || bits > 8)
                 throw new ArgumentOutOfRangeException(nameof(bits), "bits must be 1–8.");
+        }
+
+        private static void ValidateChannels(int channels)
+        {
+            if (channels < 1)
+                throw new ArgumentOutOfRangeException(nameof(channels), "channels must be >= 1.");
         }
     }
 }

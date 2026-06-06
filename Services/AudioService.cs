@@ -22,10 +22,11 @@ namespace AudioCompressor.Services
 
             using var reader     = new AudioFileReader(filePath);
             var       format     = reader.WaveFormat;
-            var sampleProvider = reader.ToSampleProvider();
             int sampleCount = (int)(reader.Length / sizeof(float));
             float[] samples = new float[sampleCount];
-            reader.Read(samples, 0, sampleCount);
+            int samplesRead = reader.Read(samples, 0, sampleCount);
+            if (samplesRead < samples.Length)
+                Array.Resize(ref samples, samplesRead);
 
             return (format, samples, fileSizeBytes);
         }
