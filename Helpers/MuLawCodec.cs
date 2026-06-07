@@ -22,14 +22,21 @@ namespace AudioCompressor.Helpers
         /// Encodes normalized float samples [-1, 1] to 8-bit μ-law bytes.
         /// Output length equals input length (1 byte per sample).
         /// </summary>
-        public static byte[] Encode(float[] samples, CancellationToken token = default)
+        public static byte[] Encode(
+            float[] samples,
+            CancellationToken token = default,
+            Action<int>? progress = null)
         {
             byte[] output = new byte[samples.Length];
+            int reportEvery = Math.Max(1, samples.Length / 100);
             for (int i = 0; i < samples.Length; i++)
             {
                 if (token.IsCancellationRequested)
                     throw new OperationCanceledException(token);
                 output[i] = EncodeOneSample(samples[i]);
+
+                if (progress != null && (i % reportEvery == 0 || i == samples.Length - 1))
+                    progress((i + 1) * 100 / samples.Length);
             }
             return output;
         }

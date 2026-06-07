@@ -339,6 +339,8 @@ namespace AudioCompressor.ViewModels
             // Use the real file size on disk as the "original" size baseline.
             // This gives a meaningful ratio vs what the user actually had on disk.
             long originalSize = _originalFileSizeBytes;
+            long estimatedFinalCompressedSize = EstimateCompressedFileSize(settings);
+            long decodedPcm16Size = 44 + (long)settings.SampleCount * 2;
 
             byte[]?    compressedData = null;
             float[]?   decompressed   = null;
@@ -366,23 +368,28 @@ namespace AudioCompressor.ViewModels
                         });
                     }
 
-                    compressedData = Encode(settings, samples, token);
+                    void ReportEncodeProgress(int encodePct)
+                    {
+                        int overallPct = Math.Clamp(encodePct * 85 / 100, 1, 85);
+                        double fraction = encodePct / 100.0;
+                        double estimatedCompressedSize = estimatedFinalCompressedSize * fraction;
+                        double savingVsOriginalFile = (1.0 - estimatedCompressedSize / originalSize) * 100.0;
+                        double processedKb = decodedPcm16Size / 1024.0 * fraction;
+                        double speed = processedKb / (sw.Elapsed.TotalSeconds + 0.001);
+                        ReportProgress(overallPct, savingVsOriginalFile, speed);
+                    }
+
+                    compressedData = Encode(settings, samples, token, ReportEncodeProgress);
                     token.ThrowIfCancellationRequested();
 
-                    long finalCompressedSize = compressedData.Length + CompressedFileHeader.Size;
-                    long decodedPcm16Size = 44 + (long)settings.SampleCount * 2;
-
-                    for (int p = 5; p <= 100; p += 5)
-                    {
-                        double estimatedCompressedSize = finalCompressedSize * (p / 100.0);
-                        double savingVsOriginalFile = (1.0 - estimatedCompressedSize / originalSize) * 100.0;
-                        double processedKb = decodedPcm16Size / 1024.0 * (p / 100.0);
-                        double speed = processedKb / (sw.Elapsed.TotalSeconds + 0.001);
-                        ReportProgress(p, savingVsOriginalFile, speed);
-                    }
+                    double finalSavingEstimate = (1.0 - (double)estimatedFinalCompressedSize / originalSize) * 100.0;
+                    double finalSpeedEstimate = decodedPcm16Size / 1024.0 / (sw.Elapsed.TotalSeconds + 0.001);
+                    ReportProgress(90, finalSavingEstimate, finalSpeedEstimate);
 
                     decompressed = Decode(settings, compressedData);
                     token.ThrowIfCancellationRequested();
+
+                    ReportProgress(100, finalSavingEstimate, finalSpeedEstimate);
                 }
                 catch (OperationCanceledException)
                 {
@@ -424,7 +431,6 @@ namespace AudioCompressor.ViewModels
             _compressedSettings = settings;
 
             long compressedSize = compressedData!.Length + CompressedFileHeader.Size;
-            long decodedPcm16Size = 44 + (long)settings.SampleCount * 2;
 
             double diskSavingRatio = (1.0 - (double)compressedSize / originalSize) * 100.0;
             double pcmSavingRatio = (1.0 - (double)compressedSize / decodedPcm16Size) * 100.0;
@@ -551,22 +557,40 @@ namespace AudioCompressor.ViewModels
                 order);
         }
 
+        private static long EstimateCompressedFileSize(CompressionSettings settings)
+        {
+            long payloadSize = settings.AlgoId switch
+            {
+                CompressedFileHeader.AlgoId.MuLaw => settings.SampleCount,
+                CompressedFileHeader.AlgoId.Dpcm or CompressedFileHeader.AlgoId.Predictive =>
+                    ((long)settings.SampleCount * settings.Bits + 7) / 8,
+                CompressedFileHeader.AlgoId.Delta or CompressedFileHeader.AlgoId.AdaptiveDelta =>
+                    ((long)settings.SampleCount + 7) / 8,
+                _ => throw new InvalidOperationException($"Unknown algorithm: {settings.Algorithm}")
+            };
+
+            return payloadSize + CompressedFileHeader.Size;
+        }
+
         private static byte[] Encode(
-            CompressionSettings settings, float[] samples, CancellationToken token) =>
+            CompressionSettings settings,
+            float[] samples,
+            CancellationToken token,
+            Action<int>? progress = null) =>
             settings.AlgoId switch
             {
                 CompressedFileHeader.AlgoId.MuLaw =>
-                    MuLawCodec.Encode(samples, token),
+                    MuLawCodec.Encode(samples, token, progress),
                 CompressedFileHeader.AlgoId.Dpcm =>
-                    DpcmCodec.Encode(samples, settings.Bits, settings.Channels, token),
+                    DpcmCodec.Encode(samples, settings.Bits, settings.Channels, token, progress),
                 CompressedFileHeader.AlgoId.Predictive =>
-                    PredictiveCodec.Encode(samples, settings.Bits, settings.Order, settings.Channels, token),
+                    PredictiveCodec.Encode(samples, settings.Bits, settings.Order, settings.Channels, token, progress),
                 CompressedFileHeader.AlgoId.Delta =>
-                    DeltaModulationCodec.Encode(samples, DeltaStepSize, settings.Channels, token),
+                    DeltaModulationCodec.Encode(samples, DeltaStepSize, settings.Channels, token, progress),
                 CompressedFileHeader.AlgoId.AdaptiveDelta =>
                     AdaptiveDeltaModulationCodec.Encode(
                         samples, AdaptiveMinStep, AdaptiveMaxStep, AdaptiveAlpha,
-                        settings.Channels, token),
+                        settings.Channels, token, progress),
                 _ => throw new InvalidOperationException($"Unknown algorithm: {settings.Algorithm}")
             };
 

@@ -30,13 +30,15 @@ namespace AudioCompressor.Helpers
         /// <param name="bits">Bits per residual value (1–8).</param>
         public static byte[] Encode(
             float[] samples, int bits, int channels = 1,
-            CancellationToken token = default)
+            CancellationToken token = default,
+            Action<int>? progress = null)
         {
             ValidateBits(bits);
             ValidateChannels(channels);
             int       maxVal   = (1 << bits) - 1;
             var       writer   = new BitWriter();
             float[]   prev     = new float[channels];
+            int reportEvery = Math.Max(1, samples.Length / 100);
 
             for (int i = 0; i < samples.Length; i++)
             {
@@ -55,6 +57,9 @@ namespace AudioCompressor.Helpers
                 // Reconstruct exactly as the decoder will, to keep encoder/decoder in sync.
                 float dequant = (float)((double)q / maxVal * 4.0 - 2.0);
                 prev[channel] = Math.Clamp(prev[channel] + dequant, -1f, 1f);
+
+                if (progress != null && (i % reportEvery == 0 || i == samples.Length - 1))
+                    progress((i + 1) * 100 / samples.Length);
             }
 
             return writer.ToArray();

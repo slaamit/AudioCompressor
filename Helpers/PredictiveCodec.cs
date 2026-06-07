@@ -30,12 +30,14 @@ namespace AudioCompressor.Helpers
         /// <param name="order">Predictor order — how many past samples to use (default 2).</param>
         public static byte[] Encode(
             float[] samples, int bits, int order = 2, int channels = 1,
-            CancellationToken token = default)
+            CancellationToken token = default,
+            Action<int>? progress = null)
         {
             ValidateArgs(bits, order, channels);
             int     maxVal  = (1 << bits) - 1;
             var     writer  = new BitWriter();
             float[][] history = CreateHistory(channels, order);
+            int reportEvery = Math.Max(1, samples.Length / 100);
 
             for (int i = 0; i < samples.Length; i++)
             {
@@ -58,6 +60,9 @@ namespace AudioCompressor.Helpers
                 float reconstructed = Math.Clamp(predicted + dequant, -1f, 1f);
 
                 ShiftHistory(history[channel], reconstructed, order);
+
+                if (progress != null && (i % reportEvery == 0 || i == samples.Length - 1))
+                    progress((i + 1) * 100 / samples.Length);
             }
 
             return writer.ToArray();

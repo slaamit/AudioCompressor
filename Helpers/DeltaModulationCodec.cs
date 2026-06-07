@@ -33,11 +33,14 @@ namespace AudioCompressor.Helpers
         /// </param>
         public static byte[] Encode(
             float[] samples, float stepSize = 0.05f,
-            int channels = 1, CancellationToken token = default)
+            int channels = 1,
+            CancellationToken token = default,
+            Action<int>? progress = null)
         {
             ValidateArgs(stepSize, channels);
             byte[] encoded = new byte[(samples.Length + 7) / 8];
             float[] prev   = new float[channels];
+            int reportEvery = Math.Max(1, samples.Length / 100);
 
             for (int i = 0; i < samples.Length; i++)
             {
@@ -50,6 +53,9 @@ namespace AudioCompressor.Helpers
 
                 prev[channel] += bit == 1 ? stepSize : -stepSize;
                 prev[channel]  = Math.Clamp(prev[channel], -1f, 1f);
+
+                if (progress != null && (i % reportEvery == 0 || i == samples.Length - 1))
+                    progress((i + 1) * 100 / samples.Length);
             }
 
             return encoded;
