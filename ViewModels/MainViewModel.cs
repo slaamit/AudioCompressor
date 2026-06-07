@@ -72,7 +72,7 @@ namespace AudioCompressor.ViewModels
             }
         }
 
-        private int _quantizationBits = 4;
+        private int _quantizationBits = 2;
         public  int  QuantizationBits
         {
             get => _quantizationBits;
@@ -86,7 +86,7 @@ namespace AudioCompressor.ViewModels
             set { _predictorOrder = value; OnPropertyChanged(); InvalidateCompressedResult(); }
         }
 
-        private string _selectedSampleRateOption = "Original";
+        private string _selectedSampleRateOption = "8000";
         public string SelectedSampleRateOption
         {
             get => _selectedSampleRateOption;
@@ -95,11 +95,11 @@ namespace AudioCompressor.ViewModels
 
         public string SettingsHelpText => SelectedAlgorithm switch
         {
-            "Nonlinear Quantization" => "Uses fixed 8-bit mu-law quantization. Good against WAV/PCM, often larger than MP3/FLAC.",
-            "DPCM" => "Uses Bits per sample. Lower bits = smaller file and lower quality. Valid range: 1 to 8.",
-            "Predictive Differential Coding" => "Uses Bits per sample and Predictor order. Lower bits = smaller file. Valid range: 1 to 8.",
+            "Nonlinear Quantization" => "Uses fixed 8-bit mu-law quantization. Usually larger than MP3 unless sample rate is reduced.",
+            "DPCM" => "Uses Bits per sample. Use 1-2 bits and 8000 Hz for smaller files. Valid range: 1 to 8.",
+            "Predictive Differential Coding" => "Uses Bits per sample and Predictor order. Use 1-2 bits and 8000 Hz for smaller files.",
             "Delta Modulation" => "Uses fixed 1-bit delta modulation. Small output, lower quality.",
-            "Adaptive Delta Modulation" => "Uses fixed 1-bit adaptive delta modulation. Smallest default output.",
+            "Adaptive Delta Modulation" => "Uses fixed 1-bit adaptive delta modulation. Best default for small files.",
             _ => ""
         };
 
@@ -124,8 +124,11 @@ namespace AudioCompressor.ViewModels
         private PlotModel? _waveformModel;
         public  PlotModel?  WaveformModel { get => _waveformModel; set { _waveformModel = value; OnPropertyChanged(); } }
 
-        private PlotModel _compressionPlotModel = null!;
-        public  PlotModel  CompressionPlotModel { get => _compressionPlotModel; set { _compressionPlotModel = value; OnPropertyChanged(); } }
+        private PlotModel _compressionRatioPlotModel = null!;
+        public  PlotModel  CompressionRatioPlotModel { get => _compressionRatioPlotModel; set { _compressionRatioPlotModel = value; OnPropertyChanged(); } }
+
+        private PlotModel _compressionSpeedPlotModel = null!;
+        public  PlotModel  CompressionSpeedPlotModel { get => _compressionSpeedPlotModel; set { _compressionSpeedPlotModel = value; OnPropertyChanged(); } }
 
         private string _compressionRatioText = "N/A";
         public  string  CompressionRatioText { get => _compressionRatioText; set { _compressionRatioText = value; OnPropertyChanged(); } }
@@ -162,11 +165,15 @@ namespace AudioCompressor.ViewModels
             DecompressLoadedCommand   = new RelayCommand(ExecuteDecompressLoaded);
             PlayDecompressedCommand   = new RelayCommand(ExecutePlayDecompressed);
 
-            CompressionPlotModel = new PlotModel { Title = "Compression Metrics" };
-            CompressionPlotModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Progress (%)" });
-            CompressionPlotModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left,   Title = "Value" });
-            CompressionPlotModel.Series.Add(new LineSeries { Title = "Saving vs PCM (%)", Color = OxyColors.Green });
-            CompressionPlotModel.Series.Add(new LineSeries { Title = "Speed (KB/s)", Color = OxyColors.Orange });
+            CompressionRatioPlotModel = new PlotModel { Title = "Compression Ratio" };
+            CompressionRatioPlotModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Progress (%)" });
+            CompressionRatioPlotModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Saving vs Original File (%)" });
+            CompressionRatioPlotModel.Series.Add(new LineSeries { Title = "Saving vs Original File", Color = OxyColors.Green });
+
+            CompressionSpeedPlotModel = new PlotModel { Title = "Compression Speed" };
+            CompressionSpeedPlotModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Progress (%)" });
+            CompressionSpeedPlotModel.Axes.Add(new LinearAxis { Position = AxisPosition.Left, Title = "Speed (KB/s)" });
+            CompressionSpeedPlotModel.Series.Add(new LineSeries { Title = "Processing Speed", Color = OxyColors.Orange });
 
             WaveformModel = new PlotModel { Title = "Audio Waveform" };
             WaveformModel.Axes.Add(new LinearAxis { Position = AxisPosition.Bottom, Title = "Sample" });
@@ -203,25 +210,33 @@ namespace AudioCompressor.ViewModels
             BuildWaveform(_originalSamples);
         }
 
-        private void ClearCompressionPlot()
+        private void ClearCompressionPlots()
         {
-            foreach (var series in CompressionPlotModel.Series)
+            foreach (var series in CompressionRatioPlotModel.Series)
                 if (series is LineSeries line)
                     line.Points.Clear();
 
-            CompressionPlotModel.InvalidatePlot(true);
+            foreach (var series in CompressionSpeedPlotModel.Series)
+                if (series is LineSeries line)
+                    line.Points.Clear();
+
+            CompressionRatioPlotModel.InvalidatePlot(true);
+            CompressionSpeedPlotModel.InvalidatePlot(true);
         }
 
-        private void AddCompressionMetricPoint(int progress, double savingVsPcm, double speedKbPerSecond)
+        private void AddCompressionMetricPoint(int progress, double savingVsOriginalFile, double speedKbPerSecond)
         {
-            if (CompressionPlotModel.Series.Count < 2) return;
+            if (CompressionRatioPlotModel.Series.Count == 0 ||
+                CompressionSpeedPlotModel.Series.Count == 0)
+                return;
 
-            if (CompressionPlotModel.Series[0] is LineSeries savingSeries)
-                savingSeries.Points.Add(new DataPoint(progress, savingVsPcm));
-            if (CompressionPlotModel.Series[1] is LineSeries speedSeries)
+            if (CompressionRatioPlotModel.Series[0] is LineSeries savingSeries)
+                savingSeries.Points.Add(new DataPoint(progress, savingVsOriginalFile));
+            if (CompressionSpeedPlotModel.Series[0] is LineSeries speedSeries)
                 speedSeries.Points.Add(new DataPoint(progress, speedKbPerSecond));
 
-            CompressionPlotModel.InvalidatePlot(true);
+            CompressionRatioPlotModel.InvalidatePlot(true);
+            CompressionSpeedPlotModel.InvalidatePlot(true);
         }
 
         // ── Load ─────────────────────────────────────────────────────────────
@@ -271,7 +286,7 @@ namespace AudioCompressor.ViewModels
                 CompressionRatioText = "N/A";
                 SpeedText            = "N/A";
                 ProgressValue        = 0;
-                ClearCompressionPlot();
+                ClearCompressionPlots();
             }
             catch (Exception ex) { StatusMessage = $"Error loading file: {ex.Message}"; }
         }
@@ -317,7 +332,7 @@ namespace AudioCompressor.ViewModels
             ProgressValue        = 0;
             CompressionRatioText = "Calculating...";
             SpeedText            = "0 KB/s";
-            ClearCompressionPlot();
+            ClearCompressionPlots();
 
             var  sw           = Stopwatch.StartNew();
 
@@ -338,16 +353,16 @@ namespace AudioCompressor.ViewModels
             {
                 try
                 {
-                    void ReportProgress(int pct, double savingVsPcm, double speedKbPerSecond)
+                    void ReportProgress(int pct, double savingVsOriginalFile, double speedKbPerSecond)
                     {
                         if (token.IsCancellationRequested) return;
                         App.Current.Dispatcher.InvokeAsync(() =>
                         {
                             if (token.IsCancellationRequested) return;
                             ProgressValue        = pct;
-                            CompressionRatioText = $"{savingVsPcm:F1}%";
+                            CompressionRatioText = $"{savingVsOriginalFile:F1}%";
                             SpeedText            = $"{speedKbPerSecond:F0} KB/s";
-                            AddCompressionMetricPoint(pct, savingVsPcm, speedKbPerSecond);
+                            AddCompressionMetricPoint(pct, savingVsOriginalFile, speedKbPerSecond);
                         });
                     }
 
@@ -360,10 +375,10 @@ namespace AudioCompressor.ViewModels
                     for (int p = 5; p <= 100; p += 5)
                     {
                         double estimatedCompressedSize = finalCompressedSize * (p / 100.0);
-                        double savingVsPcm = (1.0 - estimatedCompressedSize / decodedPcm16Size) * 100.0;
+                        double savingVsOriginalFile = (1.0 - estimatedCompressedSize / originalSize) * 100.0;
                         double processedKb = decodedPcm16Size / 1024.0 * (p / 100.0);
                         double speed = processedKb / (sw.Elapsed.TotalSeconds + 0.001);
-                        ReportProgress(p, savingVsPcm, speed);
+                        ReportProgress(p, savingVsOriginalFile, speed);
                     }
 
                     decompressed = Decode(settings, compressedData);
@@ -392,7 +407,7 @@ namespace AudioCompressor.ViewModels
                 ProgressValue        = 0;
                 CompressionRatioText = "N/A";
                 SpeedText            = "N/A";
-                ClearCompressionPlot();
+                ClearCompressionPlots();
                 return;
             }
 
@@ -416,7 +431,7 @@ namespace AudioCompressor.ViewModels
             double estimatedBitRate = settings.SampleRate * settings.Channels * settings.Bits / 1000.0;
             double elapsedSeconds = Math.Max(sw.Elapsed.TotalSeconds, 0.001);
             string note = diskSavingRatio < 0
-                ? "\nNote: The source file is already compressed on disk. Compare against decoded PCM for algorithm compression."
+                ? "\nNote: This output is larger than the original file. The source is probably already compressed, like MP3/FLAC. For a smaller saved file, use Adaptive Delta or Delta, Target Sample Rate = 8000, or DPCM/Predictive with 1-2 bits."
                 : "";
 
             ReportText =
@@ -437,7 +452,9 @@ namespace AudioCompressor.ViewModels
                 $"Speed:           {originalSize / 1024.0 / elapsedSeconds:F0} KB/s" +
                 note;
 
-            StatusMessage        = $"Compressed with {settings.Algorithm}.";
+            StatusMessage        = diskSavingRatio < 0
+                ? $"Compressed with {settings.Algorithm}, but output is larger than original. Try 8000 Hz and 1-bit/2-bit settings."
+                : $"Compressed with {settings.Algorithm}.";
             ProgressValue        = 100;
             CompressionRatioText = $"{diskSavingRatio:F1}%";
             BuildWaveform(decompressed!);
@@ -587,13 +604,13 @@ namespace AudioCompressor.ViewModels
             CompressionRatioText  = "N/A";
             SpeedText             = "N/A";
             ProgressValue         = 0;
-            ClearCompressionPlot();
+            ClearCompressionPlots();
             _suppressSettingsInvalidation = true;
             try
             {
                 SelectedAlgorithm = "Adaptive Delta Modulation";
-                SelectedSampleRateOption = "Original";
-                QuantizationBits = 4;
+                SelectedSampleRateOption = "8000";
+                QuantizationBits = 2;
                 PredictorOrder = 2;
             }
             finally

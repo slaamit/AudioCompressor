@@ -87,14 +87,20 @@
             </StackPanel>
 
             <!-- التقرير والرسم البياني -->
-            <GroupBox Header="Compression Report and Metrics Graph" Grid.Row="5" Margin="0,5">
+            <GroupBox Header="Compression Report and Graphs" Grid.Row="5" Margin="0,5">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
+                        <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
                     <TextBlock Grid.Row="0" Text="{Binding ReportText}" TextWrapping="Wrap" FontFamily="Consolas" Margin="5" Background="#F0F0F0"/>
-                    <oxy:PlotView Grid.Row="1" Model="{Binding CompressionPlotModel}" Height="220" Margin="5"/>
+                    <GroupBox Grid.Row="1" Header="Compression Ratio Graph (Original File vs Saved File)" Margin="5">
+                        <oxy:PlotView Model="{Binding CompressionRatioPlotModel}" Height="180" Margin="5"/>
+                    </GroupBox>
+                    <GroupBox Grid.Row="2" Header="Compression Speed Graph" Margin="5">
+                        <oxy:PlotView Model="{Binding CompressionSpeedPlotModel}" Height="180" Margin="5"/>
+                    </GroupBox>
                 </Grid>
             </GroupBox>
         </Grid>
